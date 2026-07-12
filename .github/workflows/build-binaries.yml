@@ -52,8 +52,11 @@ jobs:
         with:
           cuda: "12.8.0"
           method: "network"
-          # nvcc to compile; cudart/cublas (+dev) to link and to bundle at runtime.
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas-dev", "nvjitlink"]'
+          # sub-packages get a "cuda-" prefix + "-12-8" suffix (cuda-nvcc-12-8 ...).
+          sub-packages: '["nvcc", "cudart", "cudart-dev"]'
+          # cuBLAS / nvJitLink are lib* packages, NOT cuda-*, so they go here
+          # (unprefixed; the action still appends -12-8): libcublas-12-8, etc.
+          non-cuda-sub-packages: '["libcublas", "libcublas-dev", "libnvjitlink", "libnvjitlink-dev"]'
 
       - name: Show toolchain
         run: |
