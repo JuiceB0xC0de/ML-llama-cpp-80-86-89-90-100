@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# run-llama-server — point LD_LIBRARY_PATH at the bundled CUDA libs, then exec
+# llama-server. Lets the binaries use their own cuBLAS/cudart regardless of what
+# the pod's base image ships. Layout on the pod:  <APP>/bin/  and  <APP>/lib/
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+export LD_LIBRARY_PATH="${HERE}/../lib:${LD_LIBRARY_PATH:-}"
+exec "${HERE}/llama-server" "$@"

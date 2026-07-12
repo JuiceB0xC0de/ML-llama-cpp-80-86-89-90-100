@@ -1,0 +1,119 @@
+name: ML-llama-cpp-80-86-89-90-100
+
+# Build llama.cpp CUDA binaries for SM 80/86/89/90/100 and publish them to the
+# HF dataset juiceb0xc0de/llama-cpp-cu12-8-sm-80-86-89-90-100 (bin/ + lib/).
+# Replaces the manual HF-Spaces build. No GPU needed to COMPILE — nvcc targets
+# the arches without a card present.
+#
+# KEY: we build on ubuntu-22.04 (glibc 2.35) on purpose. The build OS sets the
+# minimum runtime glibc, so 2.35 binaries load on EVERY RunPod template,
+# including the Ubuntu 22.04 ones your Debian-12 (2.38) build could not.
+#
+# Requires one repo secret: HF_TOKEN  (a write token for the dataset).
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_ref:
+        description: "llama.cpp git ref to build (tag/branch/sha)"
+        default: "master"
+        required: false
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/build-binaries.yml"
+      - "wrapper/**"
+
+concurrency:
+  group: build-binaries
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04          # glibc 2.35 -> widest RunPod compatibility
+    timeout-minutes: 120
+    env:
+      CUDA_ARCHES: "80;86;89;90;100"
+      DATASET: "juiceb0xc0de/llama-cpp-cu12-8-sm-80-86-89-90-100"
+      LLAMA_REF: ${{ github.event.inputs.llama_ref || 'master' }}
+
+    steps:
+      - name: Checkout this repo (for the wrapper)
+        uses: actions/checkout@v4
+
+      - name: Free up disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Install CUDA 12.8 toolkit (nvcc + cuBLAS)
+        uses: Jimver/cuda-toolkit@v0.2.24
+        id: cuda
+        with:
+          cuda: "12.8.0"
+          method: "network"
+          # nvcc to compile; cudart/cublas (+dev) to link and to bundle at runtime.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas-dev", "nvjitlink"]'
+
+      - name: Show toolchain
+        run: |
+          nvcc --version
+          gcc --version | head -1
+          cmake --version | head -1
+          ldd --version | head -1
+
+      - name: Clone llama.cpp @ ${{ env.LLAMA_REF }}
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp.git
+          cd llama.cpp
+          git checkout "$LLAMA_REF"
+          echo "LLAMA_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Configure + build (CUDA, arches ${{ env.CUDA_ARCHES }})
+        working-directory: llama.cpp
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_CURL=OFF \
+            -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHES"
+          cmake --build build --config Release -j"$(nproc)" \
+            --target llama-server llama-cli llama-quantize
+
+      - name: Stage bin/ + lib/ (+ wrapper) exactly like the dataset layout
+        run: |
+          set -euo pipefail
+          mkdir -p staging/bin staging/lib
+          for b in llama-server llama-cli llama-quantize; do
+            cp "llama.cpp/build/bin/$b" staging/bin/
+          done
+          # runtime wrapper (source of truth lives in this repo)
+          install -m 0755 wrapper/run-llama-server staging/bin/run-llama-server
+
+          # bundle the CUDA runtime libs the binaries link against, so the pod
+          # doesn't need a matching CUDA toolkit installed.
+          CUDA_LIB="${CUDA_PATH:-/usr/local/cuda}/lib64"
+          for so in libcudart libcublas libcublasLt libnvJitLink; do
+            f=$(ls "$CUDA_LIB/$so.so."* 2>/dev/null | sort -V | tail -1 || true)
+            [ -n "$f" ] && cp -v "$f" staging/lib/ || echo "WARN: $so not found in $CUDA_LIB"
+          done
+
+          echo "=== staged ==="; find staging -type f -exec ls -lh {} \;
+          echo "=== linkage check on llama-server ==="
+          ( cd staging/bin && LD_LIBRARY_PATH=../lib ldd llama-server | grep -E 'cuda|cublas|not found' || true )
+
+      - name: Publish to HF dataset ${{ env.DATASET }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "::error::HF_TOKEN secret not set — add a write token in repo Settings > Secrets."
+            exit 1
+          fi
+          pip install --quiet --upgrade "huggingface_hub[hf_transfer]"
+          export HF_HUB_ENABLE_HF_TRANSFER=1
+          hf upload "$DATASET" staging . \
+            --repo-type dataset \
+            --commit-message "CI build: llama.cpp ${LLAMA_SHA} (glibc 2.35, sm ${CUDA_ARCHES})"
+          echo "Published bin/ + lib/ to https://huggingface.co/datasets/$DATASET"
