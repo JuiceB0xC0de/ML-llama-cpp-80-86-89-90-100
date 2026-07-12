@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-22.04          # glibc 2.35 -> widest RunPod compatibility
     timeout-minutes: 120
     env:
-      CUDA_ARCHES: "80;86;89;90;100"
+      CUDA_ARCHES: "89"          # Ada Lovelace only (RTX 6000 Ada). Fast build, no timeout.
       DATASET: "juiceb0xc0de/llama-cpp-cu12-8-sm-80-86-89-90-100"
       LLAMA_REF: ${{ github.event.inputs.llama_ref || 'master' }}
 
