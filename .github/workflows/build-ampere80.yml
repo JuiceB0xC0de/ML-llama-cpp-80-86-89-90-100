@@ -1,0 +1,67 @@
+name: Build llama.cpp CUDA 12.4 Ampere
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-ampere80.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  LLAMA_CPP_REF: b9637
+  ARTIFACT_NAME: llama-cpp-cuda12-ampere80
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates cmake file git ninja-build build-essential
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Fetch pinned llama.cpp source
+        run: |
+          git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git
+          /src/llama.cpp
+          git -C /src/llama.cpp rev-parse HEAD | tee source-commit.txt
+
+      - name: Build CUDA Ampere binaries
+        run: |
+          cmake -S /src/llama.cpp -B /src/llama.cpp/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=80 \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_CURL=OFF
+          cmake --build /src/llama.cpp/build --parallel "$(nproc)" \
+            --target llama-cli llama-server llama-quantize
+
+      - name: Package runtime
+        run: |
+          mkdir -p "dist/${ARTIFACT_NAME}/bin" "dist/${ARTIFACT_NAME}/lib"
+          install -m 0755 /src/llama.cpp/build/bin/llama-{cli,server,quantize} "dist/${ARTIFACT_NAME}/bin/"
+
+          for soname in libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libnvJitLink.so.12; do
+            source_file="$(find /usr/local/cuda -type f -name "${soname}.*" -print -quit)"
+            cp "${source_file}" "dist/${ARTIFACT_NAME}/lib/"
+            ln -sf "$(basename "${source_file}")" "dist/${ARTIFACT_NAME}/lib/${soname}"
+          done
+
+          tar -C dist -czf "${ARTIFACT_NAME}.tar.gz" "${ARTIFACT_NAME}"
+          sha256sum "${ARTIFACT_NAME}.tar.gz" > "${ARTIFACT_NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llama-cpp-cuda12-ampere80
+          path: |
+            llama-cpp-cuda12-ampere80.tar.gz
+            llama-cpp-cuda12-ampere80.tar.gz.sha256
+          retention-days: 90
